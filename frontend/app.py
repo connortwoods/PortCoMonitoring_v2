@@ -9,8 +9,9 @@ PortCoMonitoring Streamlit frontend.
 import os
 from pathlib import Path
 
-import streamlit as st
 import pandas as pd
+import requests
+import streamlit as st
 
 # Load .env from project root or frontend/
 for d in [Path(__file__).resolve().parent.parent, Path(__file__).resolve().parent]:
@@ -23,6 +24,12 @@ for d in [Path(__file__).resolve().parent.parent, Path(__file__).resolve().paren
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").strip()
 SUPABASE_KEY = os.environ.get("SUPABASE_ANON_KEY") or os.environ.get("SUPABASE_SERVICE_KEY", "").strip()
 
+# GitHub Actions trigger configuration (for "Run now" button)
+GITHUB_REPO = os.environ.get("GITHUB_REPO", "").strip()  # e.g. "your-username/PortCoMonitoring_v2"
+GITHUB_WORKFLOW_ID = os.environ.get("GITHUB_WORKFLOW_ID", "monitor.yml").strip()
+GITHUB_WORKFLOW_TOKEN = os.environ.get("GITHUB_WORKFLOW_TOKEN", "").strip()
+GITHUB_DEFAULT_REF = os.environ.get("GITHUB_DEFAULT_REF", "main").strip()
+
 
 def get_supabase():
     if not SUPABASE_URL or not SUPABASE_KEY:
@@ -30,6 +37,38 @@ def get_supabase():
         return None
     from supabase import create_client
     return create_client(SUPABASE_URL, SUPABASE_KEY)
+
+
+def trigger_github_workflow() -> None:
+    """
+    Trigger the GitHub Actions workflow that runs the backend monitor via workflow_dispatch.
+    Requires Streamlit secrets/env:
+      - GITHUB_REPO (e.g. "your-username/PortCoMonitoring_v2")
+      - GITHUB_WORKFLOW_TOKEN (PAT with repo + workflow scope)
+      - optional: GITHUB_WORKFLOW_ID (defaults to "monitor.yml"), GITHUB_DEFAULT_REF (defaults to "main")
+    """
+    if not GITHUB_REPO or not GITHUB_WORKFLOW_TOKEN:
+        st.error(
+            "GitHub workflow trigger is not configured. "
+            "Set GITHUB_REPO and GITHUB_WORKFLOW_TOKEN in Streamlit secrets."
+        )
+        return
+
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/{GITHUB_WORKFLOW_ID}/dispatches"
+    headers = {
+        "Authorization": f"Bearer {GITHUB_WORKFLOW_TOKEN}",
+        "Accept": "application/vnd.github+json",
+    }
+    payload = {"ref": GITHUB_DEFAULT_REF}
+
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=10)
+        if resp.status_code in (201, 204):
+            st.success("Backend run triggered. Check GitHub Actions for progress.")
+        else:
+            st.error(f"Failed to trigger workflow ({resp.status_code}): {resp.text[:300]}")
+    except Exception as exc:
+        st.error(f"Error triggering GitHub workflow: {exc}")
 
 
 def main():
@@ -114,17 +153,35 @@ def main():
             st.dataframe(pd.DataFrame(log_rows), use_container_width=True)
 
     with tab_run:
-        st.markdown("""
-        The backend runs on **GitHub Actions** (scheduled or manual).
+        st.markdown(
+            """
+            The backend runs on **GitHub Actions** (scheduled daily and manual).
 
-        To trigger a run **now**:
-        1. Open your repo → **Actions** → **PortCo Monitor**.
-        2. Click **Run workflow** → **Run workflow**.
+            - It runs `backend/monitor.py`, which:
+              - Scrapes company websites and detects changes
+              - Updates Glassdoor insights
+              - Updates LinkedIn headcount (when configured)
+            """
+        )
 
-        Ensure these repo secrets are set: `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, and optionally  
-        `SERPAPI_KEY`, `SENDGRID_API_KEY`, `ALERT_FROM_EMAIL`.
-        """)
-        st.link_button("Open GitHub Actions", "https://github.com/YOUR_USERNAME/PortCoMonitoring/actions", type="secondary")
+        if GITHUB_REPO:
+            repo_url = f"https://github.com/{GITHUB_REPO}"
+            actions_url = f"{repo_url}/actions"
+        else:
+            repo_url = "https://github.com"
+            actions_url = "https://github.com"
+
+        st.link_button("Open GitHub Actions", actions_url, type="secondary")
+
+        st.divider()
+        st.subheader("Run now from Streamlit")
+        st.caption(
+            "This triggers the GitHub Actions workflow (`monitor.yml`) via the GitHub API. "
+            "Configure `GITHUB_REPO` and `GITHUB_WORKFLOW_TOKEN` in Streamlit secrets."
+        )
+
+        if st.button("Run backend now", type="primary"):
+            trigger_github_workflow()
 
 
 if __name__ == "__main__":
